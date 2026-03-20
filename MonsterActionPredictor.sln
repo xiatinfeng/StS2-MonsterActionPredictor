@@ -1,0 +1,28 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 18
+VisualStudioVersion = 18.2.11415.280 d18.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MonsterActionPredictor", "MonsterActionPredictor.csproj", "{34F54AB3-A491-E44C-43E3-344999DB969A}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		ExportDebug|Any CPU = ExportDebug|Any CPU
+		ExportRelease|Any CPU = ExportRelease|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{34F54AB3-A491-E44C-43E3-344999DB969A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{34F54AB3-A491-E44C-43E3-344999DB969A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{34F54AB3-A491-E44C-43E3-344999DB969A}.ExportDebug|Any CPU.ActiveCfg = ExportDebug|Any CPU
+		{34F54AB3-A491-E44C-43E3-344999DB969A}.ExportDebug|Any CPU.Build.0 = ExportDebug|Any CPU
+		{34F54AB3-A491-E44C-43E3-344999DB969A}.ExportRelease|Any CPU.ActiveCfg = ExportRelease|Any CPU
+		{34F54AB3-A491-E44C-43E3-344999DB969A}.ExportRelease|Any CPU.Build.0 = ExportRelease|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {0CF65B75-4C14-4D54-B6AC-2FE7A907D935}
+	EndGlobalSection
+EndGlobal

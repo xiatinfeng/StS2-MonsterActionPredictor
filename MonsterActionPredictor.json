@@ -1,0 +1,11 @@
+{
+  "id": "MonsterActionPredictor",
+  "name": "Monster Action Predictor",
+  "version": "1.0.0",
+  "author": "ByQsA",
+  "description": "Shows the next 3 moves of monsters on their right side",
+  "has_dll": true,
+  "has_pck": false,
+  "affectsGameplay": false,
+  "dependencies": []
+}
