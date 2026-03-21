@@ -49,6 +49,10 @@ namespace MonsterActionPredictor
             {
                 if (monster.MoveStateMachine == null) return predictions;
 
+                var currentStateField = typeof(MonsterMoveStateMachine).GetField("_currentState", BindingFlags.NonPublic | BindingFlags.Instance);
+                var currentState = (MonsterState)currentStateField.GetValue(monster.MoveStateMachine);
+                if (currentState?.Id == "STUNNED") return predictions;
+
                 var clonedMachine = CloneStateMachine(monster.MoveStateMachine);
                 var targets = monster.CombatState.PlayerCreatures;
                 var rng = new Rng(monster.RunRng.MonsterAi.Seed, rngCounter);
@@ -269,6 +273,7 @@ namespace MonsterActionPredictor
                         {
                             intentNode = NIntent.Create(0f);
                             if (intentNode == null) continue;
+                            intentNode.Modulate = new Color(0.7f, 0.7f, 0.8f, 0.6f);
                             row.AddChild(intentNode);
                         }
 
