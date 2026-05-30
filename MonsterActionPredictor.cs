@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
 using Godot;
 using HarmonyLib;
@@ -8,7 +7,6 @@ using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Modding;
 using MegaCrit.Sts2.Core.Models;
-using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
 using MegaCrit.Sts2.Core.Nodes.Combat;
@@ -16,17 +14,14 @@ using MegaCrit.Sts2.Core.Random;
 
 namespace MonsterActionPredictor
 {
+    // v1.0.3 — Forked by xiatinfeng. Replaced Harmony RollMove patch with reflection-based polling
+    // to avoid ICombatState JIT TypeLoadException on STS2 SDK 4.6.2.
     [ModInitializerAttribute("Initialize")]
     public class MonsterActionPredictorMod
     {
         private static Harmony _harmony;
         public static Dictionary<Creature, NActionPredictor> Predictors = new Dictionary<Creature, NActionPredictor>();
-        private static readonly int PREDICTION_COUNT = 2;
-        public static bool EnableDebugLog = true;
-        
-        private static int _pendingPredictions;
-        private static int _rngCounterBeforeRollMoves;
-        private static List<Creature> _creaturesToPredict = new List<Creature>();
+        public static bool EnableDebugLog = false;
 
         public static void Log(string message)
         {
@@ -41,69 +36,6 @@ namespace MonsterActionPredictor
             _harmony = new Harmony("MonsterActionPredictor");
             _harmony.PatchAll(Assembly.GetExecutingAssembly());
             GD.Print("Monster Action Predictor mod initialized!");
-        }
-
-        public static void UpdatePrediction(Creature creature, int rngCounter)
-        {
-            if (creature?.Monster == null)
-            {
-                return;
-            }
-
-            if (Predictors.TryGetValue(creature, out var predictor))
-            {
-                var moves = PredictMoves(creature.Monster, PREDICTION_COUNT, rngCounter);
-                predictor.UpdateMoves(moves, creature);
-            }
-        }
-
-        private static void LogAllPredictions(int rngCounter)
-        {
-            Log($"[MonsterActionPredictor] ========== TURN PREDICTIONS (rngCounter: {rngCounter}) ==========");
-            foreach (var kvp in Predictors)
-            {
-                var creature = kvp.Key;
-                var monster = creature.Monster;
-                if (monster?.MoveStateMachine == null) continue;
-
-                var currentStateField = typeof(MonsterMoveStateMachine).GetField("_currentState", BindingFlags.NonPublic | BindingFlags.Instance);
-                var currentState = currentStateField?.GetValue(monster.MoveStateMachine) as MonsterState;
-
-                Log($"[{creature.Name}][{creature.SlotName}] === CURRENT TURN ===");
-                if (currentState is MoveState currentMove)
-                {
-                    Log($"[{creature.Name}][{creature.SlotName}]   Move: {currentMove.Id}");
-                    if (currentMove.Intents != null)
-                    {
-                        foreach (var intent in currentMove.Intents)
-                        {
-                            Log($"[{creature.Name}][{creature.SlotName}]     {GetIntentDetails(intent, creature, 0)}");
-                        }
-                    }
-                }
-
-                var moves = PredictMoves(monster, PREDICTION_COUNT, rngCounter);
-                Log($"[{creature.Name}][{creature.SlotName}] === FUTURE ({moves.Count} turns) ===");
-                
-                int accumulatedStrength = GetBuffAmount(monster);
-                for (int i = 0; i < moves.Count; i++)
-                {
-                    var move = moves[i];
-                    Log($"[{creature.Name}][{creature.SlotName}]   Turn+{i + 1}: {move?.Id ?? "null"} (Strength: +{accumulatedStrength})");
-                    if (move?.Intents != null)
-                    {
-                        foreach (var intent in move.Intents)
-                        {
-                            Log($"[{creature.Name}][{creature.SlotName}]     {GetIntentDetails(intent, creature, accumulatedStrength)}");
-                            if (intent is BuffIntent)
-                            {
-                                accumulatedStrength += GetBuffAmount(monster);
-                            }
-                        }
-                    }
-                }
-            }
-            Log($"[MonsterActionPredictor] ========== END PREDICTIONS ==========");
         }
 
         public static int GetBuffAmount(MonsterModel monster)
@@ -168,7 +100,7 @@ namespace MonsterActionPredictor
             if (monster == null) return null;
 
             var monsterType = monster.GetType();
-            
+
             var buffAmtField = monsterType.GetField("_buffAmt", BindingFlags.NonPublic | BindingFlags.Static);
             if (buffAmtField != null)
             {
@@ -180,133 +112,6 @@ namespace MonsterActionPredictor
             }
 
             return null;
-        }
-
-        private static List<MoveState> PredictMoves(MonsterModel monster, int count, int rngCounter)
-        {
-            var predictions = new List<MoveState>();
-            if (monster == null)
-            {
-                return predictions;
-            }
-
-            try
-            {
-                if (monster.MoveStateMachine == null) return predictions;
-
-                var currentStateField = typeof(MonsterMoveStateMachine).GetField("_currentState", BindingFlags.NonPublic | BindingFlags.Instance);
-                var currentState = (MonsterState)currentStateField.GetValue(monster.MoveStateMachine);
-                if (currentState?.Id == "STUNNED") return predictions;
-
-                var combatState = monster.Creature.CombatState;
-                if (combatState == null)
-                {
-                    return predictions;
-                }
-
-                var clonedMachine = CloneStateMachine(monster.MoveStateMachine);
-                var targets = combatState.PlayerCreatures;
-                var rng = new Rng(monster.RunRng.MonsterAi.Seed, rngCounter);
-
-                SetPerformedFirstMove(clonedMachine, true);
-
-                for (int i = 0; i < count; i++)
-                {
-                    var nextMove = clonedMachine.RollMove(targets, monster.Creature, rng);
-                    predictions.Add(nextMove);
-                    
-                    if (nextMove.MustPerformOnceBeforeTransitioning)
-                    {
-                        var performedAtLeastOnceField = typeof(MoveState).GetField("_performedAtLeastOnce", BindingFlags.NonPublic | BindingFlags.Instance);
-                        performedAtLeastOnceField?.SetValue(nextMove, true);
-                    }
-                }
-            }
-            catch (Exception e)
-            {
-                GD.PrintErr("[MonsterActionPredictor] Error predicting moves: " + e.Message);
-            }
-            return predictions;
-        }
-
-        private static void SetPerformedFirstMove(MonsterMoveStateMachine machine, bool value)
-        {
-            var performedFirstMoveField = typeof(MonsterMoveStateMachine).GetField("_performedFirstMove", BindingFlags.NonPublic | BindingFlags.Instance);
-            performedFirstMoveField?.SetValue(machine, value);
-        }
-
-        private static T ShallowClone<T>(T original)
-        {
-            var method = typeof(object).GetMethod("MemberwiseClone", BindingFlags.NonPublic | BindingFlags.Instance);
-            return (T)method.Invoke(original, null);
-        }
-
-        private static MonsterMoveStateMachine CloneStateMachine(MonsterMoveStateMachine original)
-        {
-            var clonedStatesList = new List<MonsterState>();
-            
-            foreach (var originalState in original.States.Values)
-            {
-                var clonedState = ShallowClone(originalState);
-                clonedStatesList.Add(clonedState);
-            }
-
-            var initialStateField = typeof(MonsterMoveStateMachine).GetField("_initialState", BindingFlags.NonPublic | BindingFlags.Instance);
-            var originalInitialState = (MonsterState)initialStateField.GetValue(original);
-            MonsterState clonedInitialState = clonedStatesList.First(s => s.Id == originalInitialState.Id);
-
-            var ctor = typeof(MonsterMoveStateMachine).GetConstructor(new[] { typeof(IEnumerable<MonsterState>), typeof(MonsterState) });
-            var clone = (MonsterMoveStateMachine)ctor.Invoke(new object[] { clonedStatesList, clonedInitialState });
-
-            var currentStateField = typeof(MonsterMoveStateMachine).GetField("_currentState", BindingFlags.NonPublic | BindingFlags.Instance);
-            var originalCurrentState = (MonsterState)currentStateField.GetValue(original);
-            MonsterState clonedCurrentState = clone.States[originalCurrentState.Id];
-            currentStateField.SetValue(clone, clonedCurrentState);
-
-            var performedFirstMoveField = typeof(MonsterMoveStateMachine).GetField("_performedFirstMove", BindingFlags.NonPublic | BindingFlags.Instance);
-            var performedFirstMove = (bool)performedFirstMoveField.GetValue(original);
-            performedFirstMoveField.SetValue(clone, performedFirstMove);
-
-            foreach (var state in clone.States.Values)
-            {
-                if (state is MoveState moveState && moveState.FollowUpStateId != null)
-                {
-                    if (clone.States.TryGetValue(moveState.FollowUpStateId, out var followUpState))
-                    {
-                        var followUpStateProperty = typeof(MoveState).GetProperty("FollowUpState");
-                        followUpStateProperty.SetValue(moveState, followUpState);
-                    }
-                }
-            }
-
-            return clone;
-        }
-
-        private static void StartRollMovePhase(MonsterModel monster)
-        {
-            if (_pendingPredictions == 0)
-            {
-                _rngCounterBeforeRollMoves = monster.RunRng.MonsterAi.Counter;
-                _creaturesToPredict.Clear();
-            }
-            _pendingPredictions++;
-        }
-
-        private static void EndRollMovePhase(MonsterModel monster)
-        {
-            _creaturesToPredict.Add(monster.Creature);
-            _pendingPredictions--;
-
-            if (_pendingPredictions == 0)
-            {
-                var finalRngCounter = monster.RunRng.MonsterAi.Counter;
-                LogAllPredictions(finalRngCounter);
-                foreach (var creature in _creaturesToPredict)
-                {
-                    UpdatePrediction(creature, finalRngCounter);
-                }
-                _creaturesToPredict.Clear();
-            }
         }
 
         [HarmonyPatch(typeof(NCreature), nameof(NCreature._Ready))]
@@ -324,20 +129,6 @@ namespace MonsterActionPredictor
                     Predictors[__instance.Entity] = predictor;
                     Log($"[MonsterActionPredictor] Created predictor for [{__instance.Entity.Name}][{__instance.Entity.SlotName}], total: {Predictors.Count}");
                 }
-            }
-        }
-
-        [HarmonyPatch(typeof(MonsterModel), nameof(MonsterModel.RollMove))]
-        public class PatchMonsterRollMove
-        {
-            public static void Prefix(MonsterModel __instance)
-            {
-                StartRollMovePhase(__instance);
-            }
-
-            public static void Postfix(MonsterModel __instance)
-            {
-                EndRollMovePhase(__instance);
             }
         }
     }
@@ -382,11 +173,68 @@ namespace MonsterActionPredictor
             _updateTimer = GetTree().CreateTimer(1.0f);
             _updateTimer.Timeout += () =>
             {
-                if (IsInstanceValid(this) && AssociatedCreature != null)
+                if (!IsInstanceValid(this) || AssociatedCreature == null) return;
+
+                var monster = AssociatedCreature.Monster;
+                if (monster?.MoveStateMachine == null) return;
+
+                List<MoveState> moves = new List<MoveState>();
+                try
                 {
-                    var rngCounter = AssociatedCreature.Monster?.RunRng?.MonsterAi?.Counter ?? 0;
-                    MonsterActionPredictorMod.UpdatePrediction(AssociatedCreature, rngCounter);
+                    // 1. Check current state exists (don't add to moves — game already shows it)
+                    var currentStateField = typeof(MonsterMoveStateMachine).GetField("_currentState",
+                        BindingFlags.NonPublic | BindingFlags.Instance);
+                    var currentState = currentStateField?.GetValue(monster.MoveStateMachine) as MoveState;
+                    if (currentState == null) return;
+
+                    // 2. Get targets via reflection (CRITICAL: don't access CombatState directly!)
+                    IEnumerable<Creature> targets = Array.Empty<Creature>();
+                    try
+                    {
+                        var creatureType = AssociatedCreature.GetType();
+                        var csProp = creatureType.GetProperty("CombatState");
+                        var combatState = csProp?.GetValue(AssociatedCreature);
+                        if (combatState != null)
+                        {
+                            var pcProp = combatState.GetType().GetProperty("PlayerCreatures");
+                            targets = (pcProp?.GetValue(combatState) as IEnumerable<Creature>) ?? Array.Empty<Creature>();
+                        }
+                    }
+                    catch { }
+
+                    // 3. Clone state machine and predict 2 next moves via reflection
+                    var clonedMachine = CloneStateMachine(monster.MoveStateMachine);
+
+                    // Get RNG via reflection
+                    var runRngProp = typeof(MonsterModel).GetProperty("RunRng");
+                    var runRng = runRngProp?.GetValue(monster);
+                    var maProp = runRng?.GetType().GetProperty("MonsterAi");
+                    var monsterAi = maProp?.GetValue(runRng);
+                    var seed = (uint)(monsterAi?.GetType().GetProperty("Seed")?.GetValue(monsterAi) ?? 0u);
+                    var counter = (int)(monsterAi?.GetType().GetProperty("Counter")?.GetValue(monsterAi) ?? 0);
+                    var rng = new Rng(seed, counter);
+
+                    // Set performed first move
+                    var pfmField = typeof(MonsterMoveStateMachine).GetField("_performedFirstMove",
+                        BindingFlags.NonPublic | BindingFlags.Instance);
+                    pfmField?.SetValue(clonedMachine, true);
+
+                    // Call RollMove twice via reflection to predict 2 future moves
+                    var rollMoveMethod = typeof(MonsterMoveStateMachine).GetMethod("RollMove");
+                    const int PREDICTION_COUNT = 2;
+                    for (int i = 0; i < PREDICTION_COUNT; i++)
+                    {
+                        var predicted = rollMoveMethod?.Invoke(clonedMachine, new object[] { targets, AssociatedCreature, rng }) as MoveState;
+                        if (predicted != null) moves.Add(predicted);
+                    }
                 }
+                catch (Exception e)
+                {
+                    GD.PrintErr("[MonsterActionPredictor] Prediction error: " + e.Message);
+                }
+
+                if (moves.Count > 0)
+                    UpdateMoves(moves, AssociatedCreature);
             };
         }
 
@@ -396,80 +244,74 @@ namespace MonsterActionPredictor
 
             try
             {
-                var targets = creature.CombatState?.PlayerCreatures ?? Array.Empty<Creature>();
-                int accumulatedStrength = GetInitialStrengthBonus(creature);
-
-                int rowIndex = 0;
-                for (; rowIndex < moves.Count; rowIndex++)
+                IEnumerable<Creature> targets = Array.Empty<Creature>();
+                try
                 {
-                    HBoxContainer row;
-                    if (rowIndex < _rowContainers.Count)
-                        row = _rowContainers[rowIndex];
-                    else
+                    var creatureType = creature.GetType();
+                    var csProp = creatureType.GetProperty("CombatState");
+                    var combatState = csProp?.GetValue(creature);
+                    if (combatState != null)
                     {
-                        row = new HBoxContainer();
-                        row.SizeFlagsHorizontal = SizeFlags.ShrinkEnd;
-                        row.SizeFlagsVertical = SizeFlags.ShrinkCenter;
-                        _verticalContainer.AddChild(row);
-                        _rowContainers.Add(row);
+                        var pcProp = combatState.GetType().GetProperty("PlayerCreatures");
+                        targets = (pcProp?.GetValue(combatState) as IEnumerable<Creature>) ?? Array.Empty<Creature>();
                     }
+                }
+                catch { }
 
+                int neededRows = moves?.Count ?? 0;
+
+                // Grow row containers if needed
+                while (_rowContainers.Count < neededRows)
+                {
+                    var row = new HBoxContainer();
+                    row.SizeFlagsHorizontal = SizeFlags.ShrinkEnd;
+                    row.SizeFlagsVertical = SizeFlags.ShrinkCenter;
+                    _verticalContainer.AddChild(row);
+                    _rowContainers.Add(row);
+                }
+
+                // Shrink row containers if needed
+                while (_rowContainers.Count > neededRows)
+                {
+                    var extraRow = _rowContainers[_rowContainers.Count - 1];
+                    _verticalContainer.RemoveChild(extraRow);
+                    extraRow.QueueFree();
+                    _rowContainers.RemoveAt(_rowContainers.Count - 1);
+                }
+
+                for (int rowIndex = 0; rowIndex < neededRows; rowIndex++)
+                {
                     var move = moves[rowIndex];
+                    var row = _rowContainers[rowIndex];
                     var intents = move.Intents ?? new List<AbstractIntent>();
 
-                    int intentIndex = 0;
-                    for (; intentIndex < intents.Count; intentIndex++)
+                    // Grow intent nodes if needed
+                    while (row.GetChildCount() < intents.Count)
                     {
-                        NIntent intentNode;
-                        if (intentIndex < row.GetChildCount())
-                            intentNode = row.GetChild<NIntent>(intentIndex);
-                        else
-                        {
-                            intentNode = NIntent.Create(0f);
-                            if (intentNode == null) continue;
-                            intentNode.Modulate = new Color(0.7f, 0.7f, 0.8f, 0.5f);
-                            row.AddChild(intentNode);
-                        }
-
+                        var intentNode = NIntent.Create(0f);
+                        if (intentNode == null) continue;
                         intentNode.Scale = new Vector2(0.6f, 0.6f);
-
-                        var originalIntent = intents[intentIndex];
-                        AbstractIntent displayIntent = originalIntent;
-                        
-                        if (accumulatedStrength > 0)
-                        {
-                            if (originalIntent is SingleAttackIntent singleAttackIntent)
-                            {
-                                displayIntent = new ModifiedSingleAttackIntent(singleAttackIntent, accumulatedStrength);
-                            }
-                            else if (originalIntent is MultiAttackIntent multiAttackIntent)
-                            {
-                                displayIntent = new ModifiedMultiAttackIntent(multiAttackIntent, accumulatedStrength);
-                            }
-                        }
-
-                        intentNode.UpdateIntent(displayIntent, targets, creature);
-
-                        if (originalIntent is BuffIntent)
-                        {
-                            accumulatedStrength += MonsterActionPredictorMod.GetBuffAmount(creature.Monster);
-                        }
+                        intentNode.Modulate = new Color(0.7f, 0.7f, 0.8f, 0.5f);
+                        row.AddChild(intentNode);
                     }
 
+                    // Shrink intent nodes if needed
                     while (row.GetChildCount() > intents.Count)
                     {
                         var extra = row.GetChild(row.GetChildCount() - 1);
                         row.RemoveChild(extra);
                         extra.QueueFree();
                     }
-                }
 
-                while (_verticalContainer.GetChildCount() > moves.Count)
-                {
-                    var extraRow = _verticalContainer.GetChild(_verticalContainer.GetChildCount() - 1);
-                    _verticalContainer.RemoveChild(extraRow);
-                    extraRow.QueueFree();
-                    _rowContainers.RemoveAt(_rowContainers.Count - 1);
+                    // Update intent display — no strength accumulation, show raw intents
+                    for (int intentIndex = 0; intentIndex < intents.Count; intentIndex++)
+                    {
+                        var intentNode = row.GetChild<NIntent>(intentIndex);
+                        if (intentNode != null)
+                        {
+                            intentNode.UpdateIntent(intents[intentIndex], targets, creature);
+                        }
+                    }
                 }
             }
             catch (Exception e)
@@ -478,76 +320,48 @@ namespace MonsterActionPredictor
             }
         }
 
-        private bool IsInstanceValid(GodotObject obj) => obj != null && GodotObject.IsInstanceValid(obj);
-
-        private int GetInitialStrengthBonus(Creature creature)
+        private MonsterMoveStateMachine CloneStateMachine(MonsterMoveStateMachine source)
         {
-            var monster = creature.Monster;
-            if (monster?.MoveStateMachine == null) return 0;
+            if (source == null) return null;
 
-            var currentStateField = typeof(MonsterMoveStateMachine).GetField("_currentState", BindingFlags.NonPublic | BindingFlags.Instance);
-            var currentState = currentStateField?.GetValue(monster.MoveStateMachine) as MonsterState;
+            var type = typeof(MonsterMoveStateMachine);
 
-            if (currentState is MoveState currentMove && currentMove.Intents != null)
+            // Clone States dict
+            var statesProp = type.GetProperty("States");
+            var sourceStates = statesProp?.GetValue(source) as Dictionary<string, MonsterState>;
+            var clonedStates = new Dictionary<string, MonsterState>();
+            if (sourceStates != null)
             {
-                foreach (var intent in currentMove.Intents)
+                foreach (var kv in sourceStates)
                 {
-                    if (intent is BuffIntent)
-                    {
-                        var buffAmount = MonsterActionPredictorMod.GetBuffAmount(monster);
-                        var currentStrength = creature.GetPowerAmount<StrengthPower>();
-                        
-                        if (currentStrength > 0)
-                        {
-                            return 0;
-                        }
-                        return buffAmount;
-                    }
+                    var shallow = typeof(object).GetMethod("MemberwiseClone",
+                        BindingFlags.NonPublic | BindingFlags.Instance)?.Invoke(kv.Value, null) as MonsterState;
+                    if (shallow != null) clonedStates[kv.Key] = shallow;
                 }
             }
-            return 0;
-        }
-    }
 
-    public class ModifiedSingleAttackIntent : SingleAttackIntent
-    {
-        private readonly SingleAttackIntent _original;
-        private readonly int _strengthBonus;
+            // Get initial state
+            var initField = type.GetField("_initialState", BindingFlags.NonPublic | BindingFlags.Instance);
+            var origInitial = initField?.GetValue(source) as MonsterState;
+            var clonedInitial = origInitial != null && clonedStates.TryGetValue(origInitial.Id, out var ci) ? ci : clonedStates.Values.FirstOrDefault();
 
-        public ModifiedSingleAttackIntent(SingleAttackIntent original, int strengthBonus)
-            : base((int)(original.DamageCalc?.Invoke() ?? 0) + strengthBonus)
-        {
-            _original = original;
-            _strengthBonus = strengthBonus;
-        }
+            // Create clone via reflection
+            var ctor = type.GetConstructor(new[] { typeof(IEnumerable<MonsterState>), typeof(MonsterState) });
+            var clone = (MonsterMoveStateMachine)ctor.Invoke(new object[] { clonedStates.Values.ToList(), clonedInitial });
 
-        public override int GetTotalDamage(IEnumerable<Creature> targets, Creature owner)
-        {
-            var baseDamage = _original.DamageCalc?.Invoke() ?? 0;
-            var modifiedDamage = (int)baseDamage + _strengthBonus;
-            return modifiedDamage;
-        }
-    }
+            // Copy _currentState
+            var curField = type.GetField("_currentState", BindingFlags.NonPublic | BindingFlags.Instance);
+            var origCurrent = curField?.GetValue(source) as MonsterState;
+            if (origCurrent != null && clonedStates.TryGetValue(origCurrent.Id, out var cc))
+                curField?.SetValue(clone, cc);
 
-    public class ModifiedMultiAttackIntent : MultiAttackIntent
-    {
-        private readonly MultiAttackIntent _original;
-        private readonly int _strengthBonus;
+            // Copy _performedFirstMove
+            var pfmField = type.GetField("_performedFirstMove", BindingFlags.NonPublic | BindingFlags.Instance);
+            pfmField?.SetValue(clone, pfmField?.GetValue(source));
 
-        public ModifiedMultiAttackIntent(MultiAttackIntent original, int strengthBonus)
-            : base((int)(original.DamageCalc?.Invoke() ?? 0) + strengthBonus, original.Repeats)
-        {
-            _original = original;
-            _strengthBonus = strengthBonus;
+            return clone;
         }
 
-        public override int Repeats => _original.Repeats;
-
-        public override int GetTotalDamage(IEnumerable<Creature> targets, Creature owner)
-        {
-            var baseDamage = _original.DamageCalc?.Invoke() ?? 0;
-            var modifiedDamage = (int)baseDamage + _strengthBonus;
-            return modifiedDamage * Math.Max(1, Repeats);
-        }
+        private bool IsInstanceValid(GodotObject obj) => obj != null && GodotObject.IsInstanceValid(obj);
     }
 }
